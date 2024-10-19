@@ -16,8 +16,6 @@
 #include <set>
 #include <vector>
 
-#define USE_MESH_SHADER 1
-
 static constexpr uint32_t WINDOW_WIDTH = 800;
 static constexpr uint32_t WINDOW_HEIGHT = 600;
 static char const * const APP_NAME = "Mesh Shader Test";
@@ -497,7 +495,6 @@ static void setup_render_pass() {
 }
 
 static void setup_graphics_pipeline() {
-#if USE_MESH_SHADER
 	std::vector<char> const mesh_shader_code = read_binary_file("mesh.spv");
 	VkShaderModule mesh_shader_module = create_shader_module(mesh_shader_code);
 
@@ -506,16 +503,6 @@ static void setup_graphics_pipeline() {
 	mesh_shader_stage_info.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
 	mesh_shader_stage_info.module = mesh_shader_module;
 	mesh_shader_stage_info.pName = "main";
-#else
-	std::vector<char> const vert_shader_code = read_binary_file("vert.spv");
-	VkShaderModule vert_shader_module = create_shader_module(vert_shader_code);
-
-	VkPipelineShaderStageCreateInfo vert_shader_stage_info {};
-	vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	vert_shader_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
-	vert_shader_stage_info.module = vert_shader_module;
-	vert_shader_stage_info.pName = "main";
-#endif
 
 	std::vector<char> const frag_shader_code = read_binary_file("frag.spv");
 	VkShaderModule frag_shader_module = create_shader_module(frag_shader_code);
@@ -527,11 +514,7 @@ static void setup_graphics_pipeline() {
 	frag_shader_stage_info.pName = "main";
 
 	VkPipelineShaderStageCreateInfo shader_stages[] = {
-#if USE_MESH_SHADER
 		mesh_shader_stage_info,
-#else
-		vert_shader_stage_info,
-#endif
 		frag_shader_stage_info,
 	};
 
@@ -541,18 +524,6 @@ static void setup_graphics_pipeline() {
 	dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
 	dynamic_state.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
 	dynamic_state.pDynamicStates = dynamic_states.data();
-
-#if !USE_MESH_SHADER
-	VkPipelineVertexInputStateCreateInfo vertex_input_info {};
-	vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertex_input_info.vertexBindingDescriptionCount = 0;
-	vertex_input_info.vertexAttributeDescriptionCount = 0;
-
-	VkPipelineInputAssemblyStateCreateInfo input_assembly {};
-	input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	input_assembly.primitiveRestartEnable = VK_FALSE;
-#endif
 
 	VkViewport viewport {};
 	viewport.x = 0.0f;
@@ -615,19 +586,11 @@ static void setup_graphics_pipeline() {
 	pipeline_create_info.layout = ctx.pipeline_layout;
 	pipeline_create_info.renderPass = ctx.render_pass;
 	pipeline_create_info.subpass = 0;
-#if !USE_MESH_SHADER
-	pipeline_create_info.pVertexInputState = &vertex_input_info;
-	pipeline_create_info.pInputAssemblyState = &input_assembly;
-#endif
 	result = vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &pipeline_create_info, nullptr, &ctx.graphics_pipeline);
 	check_result(result, "Failed to create graphics pipeline");
 
 	vkDestroyShaderModule(ctx.device, frag_shader_module, nullptr);
-#if USE_MESH_SHADER
 	vkDestroyShaderModule(ctx.device, mesh_shader_module, nullptr);
-#else
-	vkDestroyShaderModule(ctx.device, vert_shader_module, nullptr);
-#endif
 }
 
 static void setup_framebuffers() {
@@ -735,11 +698,7 @@ static void record_command_buffer(VkCommandBuffer command_buffer, uint32_t image
 	scissor.extent = ctx.swap_chain_extent;
 	vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
-#if USE_MESH_SHADER
 	ext.vkCmdDrawMeshTasksEXT(command_buffer, 1, 1, 1);
-#else
-	vkCmdDraw(command_buffer, 3, 1, 0, 0);
-#endif
 
 	vkCmdEndRenderPass(command_buffer);
 
