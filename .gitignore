@@ -1,3 +1,4 @@
 *.sublime*
 *.spv
 /mesh-shader/mesh-shader-test
+/ray-tracer/ray-tracer-test
