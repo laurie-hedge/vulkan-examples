@@ -1,5 +1,5 @@
 ray-tracer: main.c rgen.spv miss.spv hit.spv
-	gcc -g -o ray-tracer main.c -lvulkan
+	gcc -g -Wunused-variable -o ray-tracer main.c -lvulkan
 
 rgen.spv: rgen.glsl
 	glslc -fshader-stage=rgen rgen.glsl -o rgen.spv --target-spv=spv1.4

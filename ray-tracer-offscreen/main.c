@@ -8,8 +8,23 @@
 #define IMAGE_WIDTH  800
 #define IMAGE_HEIGHT 600
 
+struct {
+	PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT;
+	PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT;
+	PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR;
+	PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
+	PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
+	PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
+	PFN_vkGetAccelerationStructureDeviceAddressKHR vkGetAccelerationStructureDeviceAddressKHR;
+	PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR;
+	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR;
+	PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR;
+	PFN_vkCreateRayTracingPipelinesKHR vkCreateRayTracingPipelinesKHR;
+} ext;
+
 #define LOAD_EXTENSION_FUNC(FuncName) \
-	PFN_##FuncName FuncName = (PFN_##FuncName)vkGetInstanceProcAddr(instance, #FuncName)
+	ext.FuncName = (PFN_##FuncName)vkGetInstanceProcAddr(instance, #FuncName); \
+	if (!ext.FuncName) return false
 
 void save_rgb8_image_to_ppm(char const *filename,
                             uint16_t width_px,
@@ -50,6 +65,89 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 	return VK_FALSE;
 }
 
+bool create_buffer(VkDevice device,
+                   uint32_t usable_memory_types,
+                   VkDeviceSize buffer_size,
+                   VkBufferUsageFlags usage_flags,
+                   VkBuffer *buffer,
+                   VkDeviceMemory *buffer_memory,
+                   VkDeviceAddress *device_address,
+                   void const *data) {
+	VkBufferCreateInfo buffer_create_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size  = buffer_size,
+		.usage = usage_flags,
+	};
+	if (vkCreateBuffer(device, &buffer_create_info, NULL, buffer) != VK_SUCCESS) {
+		return false;
+	}
+
+	VkMemoryRequirements memory_requirements;
+	vkGetBufferMemoryRequirements(device, *buffer, &memory_requirements);
+
+	uint32_t const memory_types_matching_requirements =
+		memory_requirements.memoryTypeBits & usable_memory_types;
+	if (memory_types_matching_requirements == 0) {
+		return false;
+	}
+
+	VkMemoryAllocateFlagsInfo memory_alloc_flags_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+		.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR,
+	};
+
+	VkMemoryAllocateInfo buffer_memory_allocate_info = {
+		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext           = &memory_alloc_flags_info,
+		.allocationSize  = memory_requirements.size,
+		.memoryTypeIndex = __builtin_ctz(memory_types_matching_requirements),
+	};
+	if (vkAllocateMemory(device, &buffer_memory_allocate_info, NULL, buffer_memory) != VK_SUCCESS) {
+		return false;
+	}
+
+	if (data) {
+		void *mapped;
+		if (vkMapMemory(device, *buffer_memory, 0, buffer_size, 0, &mapped) != VK_SUCCESS) {
+			return false;
+		}
+		memcpy(mapped, data, buffer_size);
+		vkUnmapMemory(device, *buffer_memory);
+	}
+
+	if (vkBindBufferMemory(device, *buffer, *buffer_memory, 0) != VK_SUCCESS) {
+		return false;
+	}
+
+	if (device_address) {
+		VkBufferDeviceAddressInfoKHR buffer_device_address_info = {
+			.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+			.buffer = *buffer,
+		};
+		*device_address = ext.vkGetBufferDeviceAddressKHR(device, &buffer_device_address_info);
+	}
+
+	return true;
+}
+
+bool create_shader_module(VkDevice device, char const *filename, VkShaderModule *shader_module) {
+	size_t shader_code_size;
+	void *shader_code = load_binary_file(filename, &shader_code_size);
+	if (!shader_code) {
+		return false;
+	}
+
+	VkShaderModuleCreateInfo shader_module_create_info = {
+		.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = shader_code_size,
+		.pCode    = shader_code,
+	};
+
+	VkResult result = vkCreateShaderModule(device, &shader_module_create_info, NULL, shader_module);
+	free(shader_code);
+	return result == VK_SUCCESS;
+}
+
 bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_px) {
 	// create vulkan instance
 	VkApplicationInfo app_info = {
@@ -65,11 +163,11 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	char const *validation_layers[] = { "VK_LAYER_KHRONOS_validation" };
 
 	VkInstanceCreateInfo instance_create_info = {
-		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-		.pApplicationInfo = &app_info,
-		.enabledLayerCount = 1,
-		.ppEnabledLayerNames = validation_layers,
-		.enabledExtensionCount = 1,
+		.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+		.pApplicationInfo        = &app_info,
+		.enabledLayerCount       = 1,
+		.ppEnabledLayerNames     = validation_layers,
+		.enabledExtensionCount   = 1,
 		.ppEnabledExtensionNames = extension_names,
 	};
 
@@ -87,18 +185,9 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	LOAD_EXTENSION_FUNC(vkGetAccelerationStructureBuildSizesKHR);
 	LOAD_EXTENSION_FUNC(vkGetAccelerationStructureDeviceAddressKHR);
 	LOAD_EXTENSION_FUNC(vkCmdBuildAccelerationStructuresKHR);
-	LOAD_EXTENSION_FUNC(vkBuildAccelerationStructuresKHR);
 	LOAD_EXTENSION_FUNC(vkCmdTraceRaysKHR);
 	LOAD_EXTENSION_FUNC(vkGetRayTracingShaderGroupHandlesKHR);
 	LOAD_EXTENSION_FUNC(vkCreateRayTracingPipelinesKHR);
-	if (!vkCreateDebugUtilsMessengerEXT || !vkDestroyDebugUtilsMessengerEXT ||
-	    !vkGetBufferDeviceAddressKHR || !vkCreateAccelerationStructureKHR ||
-	    !vkDestroyAccelerationStructureKHR || !vkGetAccelerationStructureBuildSizesKHR ||
-	    !vkGetAccelerationStructureDeviceAddressKHR || !vkCmdBuildAccelerationStructuresKHR ||
-	    !vkBuildAccelerationStructuresKHR || !vkCmdTraceRaysKHR ||
-	    !vkGetRayTracingShaderGroupHandlesKHR || !vkCreateRayTracingPipelinesKHR) {
-		return false;
-	}
 
 	// setup debug messenger
 	VkDebugUtilsMessengerCreateInfoEXT debug_messenger_create_info = {
@@ -113,10 +202,10 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	};
 
 	VkDebugUtilsMessengerEXT debug_messenger;
-	if (vkCreateDebugUtilsMessengerEXT(instance,
-                                       &debug_messenger_create_info,
-                                       NULL,
-                                       &debug_messenger) != VK_SUCCESS) {
+	if (ext.vkCreateDebugUtilsMessengerEXT(instance,
+                                           &debug_messenger_create_info,
+                                           NULL,
+                                           &debug_messenger) != VK_SUCCESS) {
 		return false;
 	}
 
@@ -249,6 +338,21 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
+	// find host coherent memory types
+	VkPhysicalDeviceMemoryProperties memory_properties;
+	vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+	
+	uint32_t host_coherent_memory_types = 0;
+	for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+		if ((memory_properties.memoryTypes[i].propertyFlags &
+			 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+			(memory_properties.memoryTypes[i].propertyFlags &
+			 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+			) {
+			host_coherent_memory_types |= 1 << i;
+		}
+	}
+
 	// get graphics queue from device
 	VkQueue graphics_queue;
 	vkGetDeviceQueue(device, graphics_queue_index, 0, &graphics_queue);
@@ -311,24 +415,15 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	VkMemoryRequirements memory_requirements;
 	vkGetImageMemoryRequirements(device, image, &memory_requirements);
 
-	VkPhysicalDeviceMemoryProperties memory_properties;
-	vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
-
-	uint32_t memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
+	uint32_t usable_memory_bits = memory_requirements.memoryTypeBits & host_coherent_memory_types;
+	if (usable_memory_bits == 0) {
 		return false;
 	}
 
 	VkMemoryAllocateInfo memory_alloc_info = {
 		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
 		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
+		.memoryTypeIndex = __builtin_ctz(usable_memory_bits),
 	};
 	VkDeviceMemory image_memory;
 	if (vkAllocateMemory(device, &memory_alloc_info, NULL, &image_memory) != VK_SUCCESS) {
@@ -369,132 +464,38 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		 0.0f, -1.0f, 0.0f
 	};
 
-	VkBufferCreateInfo vertex_buffer_create_info = {
-		.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size        = sizeof(vertices),
-		.usage       = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-		               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
 	VkBuffer vertex_buffer;
-	if (vkCreateBuffer(device, &vertex_buffer_create_info, NULL, &vertex_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, vertex_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateFlagsInfo memory_alloc_flags_info = {
-		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
-		.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR,
-	};
-
-	VkMemoryAllocateInfo vertex_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory vertex_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &vertex_buffer_memory_alloc_info,
-	                     NULL,
-	                     &vertex_buffer_memory) != VK_SUCCESS) {
+	VkDeviceOrHostAddressConstKHR vertex_buffer_device_address;
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   sizeof(vertices),
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+	                   &vertex_buffer,
+	                   &vertex_buffer_memory,
+	                   &vertex_buffer_device_address.deviceAddress,
+	                   vertices)) {
 		return false;
 	}
-
-	void *mapped;
-	if (vkMapMemory(device, vertex_buffer_memory, 0, sizeof(vertices), 0, &mapped) != VK_SUCCESS) {
-		return false;
-	}
-	memcpy(mapped, vertices, sizeof(vertices));
-	vkUnmapMemory(device, vertex_buffer_memory);
-
-	if (vkBindBufferMemory(device, vertex_buffer, vertex_buffer_memory, 0) != VK_SUCCESS) {
-		return false;
-	}
-
-	VkBufferDeviceAddressInfoKHR vertex_buffer_device_address_info = {
-		.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-		.buffer = vertex_buffer,
-	};
-	VkDeviceOrHostAddressConstKHR vertex_buffer_device_address = {
-		.deviceAddress = vkGetBufferDeviceAddressKHR(device, &vertex_buffer_device_address_info),
-	};
 
 	// create index buffer
 	uint32_t const indices[] = { 0, 1, 2 };
 
-	VkBufferCreateInfo index_buffer_create_info = {
-		.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size        = sizeof(indices),
-		.usage       = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-		               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
 	VkBuffer index_buffer;
-	if (vkCreateBuffer(device, &index_buffer_create_info, NULL, &index_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, index_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo index_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory index_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &index_buffer_memory_alloc_info,
-	                     NULL,
-	                     &index_buffer_memory) != VK_SUCCESS) {
+	VkDeviceOrHostAddressConstKHR index_buffer_device_address;
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   sizeof(indices),
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+	                   &index_buffer,
+	                   &index_buffer_memory,
+	                   &index_buffer_device_address.deviceAddress,
+	                   indices)) {
 		return false;
 	}
-
-	if (vkMapMemory(device, index_buffer_memory, 0, sizeof(indices), 0, &mapped) != VK_SUCCESS) {
-		return false;
-	}
-	memcpy(mapped, indices, sizeof(indices));
-	vkUnmapMemory(device, index_buffer_memory);
-
-	if (vkBindBufferMemory(device, index_buffer, index_buffer_memory, 0) != VK_SUCCESS) {
-		return false;
-	}
-
-	VkBufferDeviceAddressInfoKHR index_buffer_device_address_info = {
-		.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-		.buffer = index_buffer,
-	};
-	VkDeviceOrHostAddressConstKHR index_buffer_device_address = {
-		.deviceAddress = vkGetBufferDeviceAddressKHR(device, &index_buffer_device_address_info),
-	};
 
 	// create transform matrix buffer
 	VkTransformMatrixKHR transform_matrix = {
@@ -503,67 +504,20 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		0.0f, 0.0f, 1.0f, 0.0f
 	};
 
-	VkBufferCreateInfo transform_matrix_buffer_create_info = {
-		.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size        = sizeof(transform_matrix),
-		.usage       = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-		               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
 	VkBuffer transform_matrix_buffer;
-	if (vkCreateBuffer(device,
-	                   &transform_matrix_buffer_create_info,
-	                   NULL,
-	                   &transform_matrix_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, transform_matrix_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo transform_matrix_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory transform_matrix_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &transform_matrix_buffer_memory_alloc_info,
-	                     NULL,
-	                     &transform_matrix_buffer_memory) != VK_SUCCESS) {
+	VkDeviceOrHostAddressConstKHR transform_matrix_buffer_device_address;
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   sizeof(transform_matrix),
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+	                   &transform_matrix_buffer,
+	                   &transform_matrix_buffer_memory,
+	                   &transform_matrix_buffer_device_address.deviceAddress,
+	                   &transform_matrix)) {
 		return false;
 	}
-
-	if (vkMapMemory(device, transform_matrix_buffer_memory, 0, sizeof(transform_matrix), 0, &mapped) != VK_SUCCESS) {
-		return false;
-	}
-	memcpy(mapped, &transform_matrix, sizeof(transform_matrix));
-	vkUnmapMemory(device, transform_matrix_buffer_memory);
-
-	if (vkBindBufferMemory(device, transform_matrix_buffer, transform_matrix_buffer_memory, 0) != VK_SUCCESS) {
-		return false;
-	}
-
-	VkBufferDeviceAddressInfoKHR transform_matrix_buffer_device_address_info = {
-		.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-		.buffer = transform_matrix_buffer,
-	};
-	VkDeviceOrHostAddressConstKHR transform_matrix_buffer_device_address = {
-		.deviceAddress = vkGetBufferDeviceAddressKHR(device, &transform_matrix_buffer_device_address_info),
-	};
 
 	// create bottom level acceleration structure buffer
 	VkAccelerationStructureGeometryKHR bottom_level_acceleration_structure_geometry = {
@@ -594,7 +548,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	VkAccelerationStructureBuildSizesInfoKHR acceleration_structure_build_sizes_info = {
 		.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
 	};
-	vkGetAccelerationStructureBuildSizesKHR(
+	ext.vkGetAccelerationStructureBuildSizesKHR(
 		device,
 		VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
 		&bottom_level_acceleration_structure_build_geometry_info,
@@ -602,54 +556,16 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		&acceleration_structure_build_sizes_info
 	);
 
-	VkBufferCreateInfo bottom_level_acceleration_structure_buffer_create_info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size  = acceleration_structure_build_sizes_info.accelerationStructureSize,
-		.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-		         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-	};
-
 	VkBuffer bottom_level_acceleration_structure_buffer;
-	if (vkCreateBuffer(device,
-	                   &bottom_level_acceleration_structure_buffer_create_info,
-	                   NULL,
-	                   &bottom_level_acceleration_structure_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, bottom_level_acceleration_structure_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo bottom_level_acceleration_structure_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory bottom_level_acceleration_structure_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &bottom_level_acceleration_structure_buffer_memory_alloc_info,
-	                     NULL,
-	                     &bottom_level_acceleration_structure_buffer_memory) != VK_SUCCESS) {
-		return false;
-	}
-
-	if (vkBindBufferMemory(device,
-	                       bottom_level_acceleration_structure_buffer,
-	                       bottom_level_acceleration_structure_buffer_memory,
-	                       0) != VK_SUCCESS) {
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   acceleration_structure_build_sizes_info.accelerationStructureSize,
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+	                   &bottom_level_acceleration_structure_buffer,
+	                   &bottom_level_acceleration_structure_buffer_memory,
+	                   NULL, NULL)) {
 		return false;
 	}
 
@@ -662,67 +578,27 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	};
 
 	VkAccelerationStructureKHR bottom_level_acceleration_structure;
-	if (vkCreateAccelerationStructureKHR(device,
+	if (ext.vkCreateAccelerationStructureKHR(device,
 	                                     &bottom_level_acceleration_structure_create_info,
 	                                     NULL,
 	                                     &bottom_level_acceleration_structure) != VK_SUCCESS) {
 		return false;
 	}
 
-	VkBufferCreateInfo bottom_level_acceleration_structure_build_scratch_buffer_create_info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size  = acceleration_structure_build_sizes_info.buildScratchSize,
-		.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-	};
-
 	VkBuffer scratch_buffer;
-	if (vkCreateBuffer(device,
-	                   &bottom_level_acceleration_structure_build_scratch_buffer_create_info,
-	                   NULL,
-	                   &scratch_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, scratch_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo scratch_buffer_memory_allocate_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory scratch_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &scratch_buffer_memory_allocate_info,
-	                     NULL,
-	                     &scratch_buffer_memory) != VK_SUCCESS) {
+	VkDeviceOrHostAddressKHR scratch_buffer_device_address;
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   acceleration_structure_build_sizes_info.buildScratchSize,
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+	                   &scratch_buffer,
+	                   &scratch_buffer_memory,
+	                   &scratch_buffer_device_address.deviceAddress,
+	                   NULL)) {
 		return false;
 	}
-
-	if (vkBindBufferMemory(device, scratch_buffer, scratch_buffer_memory, 0) != VK_SUCCESS) {
-		return false;
-	}
-
-	VkBufferDeviceAddressInfoKHR scratch_buffer_device_address_info = {
-		.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-		.buffer = scratch_buffer,
-	};
-	VkDeviceOrHostAddressKHR scratch_buffer_device_address = {
-		.deviceAddress = vkGetBufferDeviceAddressKHR(device, &scratch_buffer_device_address_info),
-	};
 
 	bottom_level_acceleration_structure_build_geometry_info.dstAccelerationStructure = bottom_level_acceleration_structure;
 	bottom_level_acceleration_structure_build_geometry_info.scratchData              = scratch_buffer_device_address;
@@ -746,11 +622,12 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
-	vkCmdBuildAccelerationStructuresKHR(
-			command_buffer,
-			1,
-			&bottom_level_acceleration_structure_build_geometry_info,
-			bottom_level_acceleration_structure_build_range_infos);
+	ext.vkCmdBuildAccelerationStructuresKHR(
+		command_buffer,
+		1,
+		&bottom_level_acceleration_structure_build_geometry_info,
+		bottom_level_acceleration_structure_build_range_infos
+	);
 
 	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
 		return false;
@@ -776,7 +653,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		.accelerationStructure = bottom_level_acceleration_structure,
 	};
 	uint64_t const bottom_level_acceleration_structure_buffer_device_address =
-		vkGetAccelerationStructureDeviceAddressKHR(device, &bottom_level_acceleration_device_address_info);
+		ext.vkGetAccelerationStructureDeviceAddressKHR(device, &bottom_level_acceleration_device_address_info);
 
 	vkFreeMemory(device, scratch_buffer_memory, NULL);
 	vkDestroyBuffer(device, scratch_buffer, NULL);
@@ -791,75 +668,20 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		.accelerationStructureReference         = bottom_level_acceleration_structure_buffer_device_address,
 	};
 
-	VkBufferCreateInfo acceleration_structure_instance_buffer_create_info = {
-		.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size        = sizeof(acceleration_structure_instance),
-		.usage       = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-		               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
 	VkBuffer acceleration_structure_instance_buffer;
-	if (vkCreateBuffer(device,
-	                   &acceleration_structure_instance_buffer_create_info,
-	                   NULL,
-	                   &acceleration_structure_instance_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, acceleration_structure_instance_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo acceleration_structure_instance_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory acceleration_structure_instance_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &acceleration_structure_instance_buffer_memory_alloc_info,
-	                     NULL,
-	                     &acceleration_structure_instance_buffer_memory) != VK_SUCCESS) {
+	VkDeviceOrHostAddressConstKHR acceleration_structure_instance_buffer_device_address;
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   sizeof(acceleration_structure_instance),
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+	                   &acceleration_structure_instance_buffer,
+	                   &acceleration_structure_instance_buffer_memory,
+	                   &acceleration_structure_instance_buffer_device_address.deviceAddress,
+	                   &acceleration_structure_instance)) {
 		return false;
 	}
-
-	if (vkMapMemory(device,
-	                acceleration_structure_instance_buffer_memory,
-	                0,
-	                sizeof(acceleration_structure_instance),
-	                0,
-	                &mapped) != VK_SUCCESS) {
-		return false;
-	}
-	memcpy(mapped, &acceleration_structure_instance, sizeof(acceleration_structure_instance));
-	vkUnmapMemory(device, acceleration_structure_instance_buffer_memory);
-
-	if (vkBindBufferMemory(device,
-	                       acceleration_structure_instance_buffer,
-	                       acceleration_structure_instance_buffer_memory,
-	                       0) != VK_SUCCESS) {
-		return false;
-	}
-
-	VkBufferDeviceAddressInfoKHR acceleration_structure_instance_buffer_device_address_info = {
-		.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-		.buffer = acceleration_structure_instance_buffer,
-	};
-	VkDeviceOrHostAddressConstKHR acceleration_structure_instance_buffer_device_address = {
-		.deviceAddress = vkGetBufferDeviceAddressKHR(device, &acceleration_structure_instance_buffer_device_address_info),
-	};
 
 	VkAccelerationStructureGeometryKHR top_level_acceleration_structure_geometry = {
 		.sType                              = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
@@ -881,7 +703,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	uint32_t const primitive_count = 1;
 
-	vkGetAccelerationStructureBuildSizesKHR(
+	ext.vkGetAccelerationStructureBuildSizesKHR(
 		device, 
 		VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
 		&top_level_acceleration_structure_build_geometry_info,
@@ -889,54 +711,16 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		&acceleration_structure_build_sizes_info
 	);
 
-	VkBufferCreateInfo top_level_acceleration_structure_buffer_info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size  = acceleration_structure_build_sizes_info.accelerationStructureSize,
-		.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-		         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-	};
-
 	VkBuffer top_level_acceleration_structure_buffer;
-	if (vkCreateBuffer(device,
-		&top_level_acceleration_structure_buffer_info,
-		NULL,
-		&top_level_acceleration_structure_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, top_level_acceleration_structure_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo top_level_acceleration_structure_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory top_level_acceleration_structure_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &top_level_acceleration_structure_buffer_memory_alloc_info,
-	                     NULL,
-	                     &top_level_acceleration_structure_buffer_memory) != VK_SUCCESS) {
-		return false;
-	}
-
-	if (vkBindBufferMemory(device,
-	                       top_level_acceleration_structure_buffer,
-	                       top_level_acceleration_structure_buffer_memory,
-	                       0) != VK_SUCCESS) {
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   acceleration_structure_build_sizes_info.accelerationStructureSize,
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+	                   &top_level_acceleration_structure_buffer,
+	                   &top_level_acceleration_structure_buffer_memory,
+	                   NULL, NULL)) {
 		return false;
 	}
 
@@ -949,56 +733,24 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	};
 
 	VkAccelerationStructureKHR top_level_acceleration_structure;
-	if (vkCreateAccelerationStructureKHR(device,
+	if (ext.vkCreateAccelerationStructureKHR(device,
 	                                     &top_level_acceleration_structure_info,
 	                                     NULL,
 	                                     &top_level_acceleration_structure) != VK_SUCCESS) {
 		return false;
 	}
 
-	VkBufferCreateInfo top_level_acceleration_structure_build_scratch_buffer_create_info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size  = acceleration_structure_build_sizes_info.buildScratchSize,
-		.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-	};
-
-	if (vkCreateBuffer(device,
-	                   &top_level_acceleration_structure_build_scratch_buffer_create_info,
-	                   NULL,
-	                   &scratch_buffer) != VK_SUCCESS) {
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   acceleration_structure_build_sizes_info.buildScratchSize,
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+	                   &scratch_buffer,
+	                   &scratch_buffer_memory,
+	                   &scratch_buffer_device_address.deviceAddress,
+	                   NULL)) {
 		return false;
 	}
-
-	vkGetBufferMemoryRequirements(device, scratch_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	scratch_buffer_memory_allocate_info.allocationSize  = memory_requirements.size;
-	scratch_buffer_memory_allocate_info.memoryTypeIndex = memory_type_index;
-
-	if (vkAllocateMemory(device,
-	                     &scratch_buffer_memory_allocate_info,
-	                     NULL,
-	                     &scratch_buffer_memory) != VK_SUCCESS) {
-		return false;
-	}
-
-	if (vkBindBufferMemory(device, scratch_buffer, scratch_buffer_memory, 0) != VK_SUCCESS) {
-		return false;
-	}
-
-	scratch_buffer_device_address_info.buffer   = scratch_buffer;
-	scratch_buffer_device_address.deviceAddress = vkGetBufferDeviceAddressKHR(device, &scratch_buffer_device_address_info);
 
 	top_level_acceleration_structure_build_geometry_info.dstAccelerationStructure = top_level_acceleration_structure;
 	top_level_acceleration_structure_build_geometry_info.scratchData              = scratch_buffer_device_address;
@@ -1019,7 +771,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
-	vkCmdBuildAccelerationStructuresKHR(
+	ext.vkCmdBuildAccelerationStructuresKHR(
 		command_buffer,
 		1,
 		&top_level_acceleration_structure_build_geometry_info,
@@ -1040,13 +792,6 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	vkResetFences(device, 1, &fence);
 
-	VkAccelerationStructureDeviceAddressInfoKHR top_level_acceleration_device_address_info = {
-		.sType                 = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-		.accelerationStructure = top_level_acceleration_structure,
-	};
-	uint64_t const top_level_acceleration_structure_buffer_device_address =
-		vkGetAccelerationStructureDeviceAddressKHR(device, &top_level_acceleration_device_address_info);
-
 	vkFreeMemory(device, scratch_buffer_memory, NULL);
 	vkDestroyBuffer(device, scratch_buffer, NULL);
 
@@ -1055,48 +800,16 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	// create destination buffer for image data
 	uint32_t const image_buffer_size = width_px * height_px * 4;
-	VkBufferCreateInfo image_buffer_create_info = {
-		.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size        = image_buffer_size,
-		.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
 
 	VkBuffer image_buffer;
-	if (vkCreateBuffer(device, &image_buffer_create_info, NULL, &image_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, image_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo image_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory image_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &image_buffer_memory_alloc_info,
-	                     NULL,
-	                     &image_buffer_memory) != VK_SUCCESS) {
-		return false;
-	}
-
-	if (vkBindBufferMemory(device, image_buffer, image_buffer_memory, 0) != VK_SUCCESS) {
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   image_buffer_size,
+	                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+	                   &image_buffer,
+	                   &image_buffer_memory,
+	                   NULL, NULL)) {
 		return false;
 	}
 
@@ -1141,59 +854,15 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
-	// create ray generation shader module
-	size_t rgen_shader_code_size;
-	void *rgen_shader_code = load_binary_file("rgen.spv", &rgen_shader_code_size);
-	if (!rgen_shader_code) {
-		return false;
-	}
-
-	VkShaderModuleCreateInfo rgen_shader_module_create_info = {
-		.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = rgen_shader_code_size,
-		.pCode    = rgen_shader_code,
-	};
-
+	// create shader modules
 	VkShaderModule rgen_shader_module;
-	if (vkCreateShaderModule(device, &rgen_shader_module_create_info, NULL, &rgen_shader_module) != VK_SUCCESS) {
-		return false;
-	}
-
-	// create miss shader module
-	size_t miss_shader_code_size;
-	void *miss_shader_code = load_binary_file("miss.spv", &miss_shader_code_size);
-	if (!miss_shader_code) {
-		return false;
-	}
-
-	VkShaderModuleCreateInfo miss_shader_module_create_info = {
-		.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = miss_shader_code_size,
-		.pCode    = miss_shader_code,
-	};
+	create_shader_module(device, "rgen.spv", &rgen_shader_module);
 
 	VkShaderModule miss_shader_module;
-	if (vkCreateShaderModule(device, &miss_shader_module_create_info, NULL, &miss_shader_module) != VK_SUCCESS) {
-		return false;
-	}
-
-	// create hit shader module
-	size_t hit_shader_code_size;
-	void *hit_shader_code = load_binary_file("hit.spv", &hit_shader_code_size);
-	if (!hit_shader_code) {
-		return false;
-	}
-
-	VkShaderModuleCreateInfo hit_shader_module_create_info = {
-		.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = hit_shader_code_size,
-		.pCode    = hit_shader_code,
-	};
-
+	create_shader_module(device, "miss.spv", &miss_shader_module);
+	
 	VkShaderModule hit_shader_module;
-	if (vkCreateShaderModule(device, &hit_shader_module_create_info, NULL, &hit_shader_module) != VK_SUCCESS) {
-		return false;
-	}
+	create_shader_module(device, "hit.spv", &hit_shader_module);
 
 	// create ray tracing pipeline
 	VkPipelineShaderStageCreateInfo shader_stage_create_infos[3] = {
@@ -1255,18 +924,16 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	};
 
 	VkPipeline ray_tracing_pipeline;
-	if (vkCreateRayTracingPipelinesKHR(device,
-	                                   VK_NULL_HANDLE, VK_NULL_HANDLE,
-	                                   1,
-	                                   &ray_tracing_pipeline_create_info,
-	                                   NULL, &ray_tracing_pipeline) != VK_SUCCESS) {
+	if (ext.vkCreateRayTracingPipelinesKHR(device,
+	                                       VK_NULL_HANDLE, VK_NULL_HANDLE,
+	                                       1,
+	                                       &ray_tracing_pipeline_create_info,
+	                                       NULL,
+	                                       &ray_tracing_pipeline) != VK_SUCCESS) {
 		return false;
 	}
 
 	// free shader modules
-	free(hit_shader_code);
-	free(miss_shader_code);
-	free(rgen_shader_code);
 	vkDestroyShaderModule(device, hit_shader_module, NULL);
 	vkDestroyShaderModule(device, miss_shader_module, NULL);
 	vkDestroyShaderModule(device, rgen_shader_module, NULL);
@@ -1280,77 +947,40 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	    : ((shader_handle_size / shader_handle_alignment) + 1) * shader_handle_alignment;
 	uint32_t const shader_table_size = shader_handle_size_aligned * 3;
 
-	VkBufferCreateInfo shader_table_buffer_create_info = {
-		.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size        = shader_table_size,
-		.usage       = VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
-		               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
-
 	VkBuffer shader_table_buffer;
-	if (vkCreateBuffer(device, &shader_table_buffer_create_info, NULL, &shader_table_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkGetBufferMemoryRequirements(device, shader_table_buffer, &memory_requirements);
-
-	memory_type_index = UINT32_MAX;
-	for (memory_type_index = 0; memory_type_index < memory_properties.memoryTypeCount; ++memory_type_index) {
-		if ((memory_requirements.memoryTypeBits & (1 << memory_type_index)) &&
-			(memory_properties.memoryTypes[memory_type_index].propertyFlags &
-			 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-			break;
-		}
-	}
-	if (memory_type_index == UINT32_MAX) {
-		return false;
-	}
-
-	VkMemoryAllocateInfo shader_table_buffer_memory_alloc_info = {
-		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.pNext           = &memory_alloc_flags_info,
-		.allocationSize  = memory_requirements.size,
-		.memoryTypeIndex = memory_type_index,
-	};
-
 	VkDeviceMemory shader_table_buffer_memory;
-	if (vkAllocateMemory(device,
-	                     &shader_table_buffer_memory_alloc_info,
-	                     NULL,
-	                     &shader_table_buffer_memory) != VK_SUCCESS) {
+	VkDeviceOrHostAddressConstKHR shader_table_buffer_device_address;
+	if (!create_buffer(device,
+	                   host_coherent_memory_types,
+	                   shader_table_size,
+	                   VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
+	                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+	                   &shader_table_buffer,
+	                   &shader_table_buffer_memory,
+	                   &shader_table_buffer_device_address.deviceAddress,
+	                   NULL)) {
 		return false;
 	}
 
+	void *mapped;
 	if (vkMapMemory(device, shader_table_buffer_memory, 0, shader_table_size, 0, &mapped) != VK_SUCCESS) {
 		return false;
 	}
 
 	for (uint32_t i = 0; i < 3; ++i) {
-		if (vkGetRayTracingShaderGroupHandlesKHR(device,
-		                                         ray_tracing_pipeline,
-		                                         i,
-		                                         1,
-		                                         shader_handle_size_aligned,
-		                                         (uint8_t *)mapped + (i * shader_handle_size_aligned)
-		                                        ) != VK_SUCCESS) {
+		if (ext.vkGetRayTracingShaderGroupHandlesKHR(
+			device,
+			ray_tracing_pipeline,
+			i,
+			1,
+			shader_handle_size_aligned,
+			(uint8_t *)mapped + (i * shader_handle_size_aligned)
+		) != VK_SUCCESS) {
 			return false;
 		}
 	}
 
 	vkUnmapMemory(device, shader_table_buffer_memory);
-
-	if (vkBindBufferMemory(device, shader_table_buffer, shader_table_buffer_memory, 0) != VK_SUCCESS) {
-		return false;
-	}
-
-	VkBufferDeviceAddressInfoKHR shader_table_buffer_device_address_info = {
-		.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-		.buffer = shader_table_buffer,
-	};
-	VkDeviceOrHostAddressConstKHR shader_table_buffer_device_address = {
-		.deviceAddress = vkGetBufferDeviceAddressKHR(device, &shader_table_buffer_device_address_info),
-	};
 
 	// create descriptor pool
 	VkDescriptorPoolSize descriptor_pool_sizes[2] = {
@@ -1482,7 +1112,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	VkStridedDeviceAddressRegionKHR callable_shader_table_entry = { };
 
-	vkCmdTraceRaysKHR(
+	ext.vkCmdTraceRaysKHR(
 		command_buffer,
 		&raygen_shader_table_entry,
 		&miss_shader_table_entry,
@@ -1570,10 +1200,10 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
 	vkFreeMemory(device, image_buffer_memory, NULL);
 	vkDestroyBuffer(device, image_buffer, NULL);
-	vkDestroyAccelerationStructureKHR(device, top_level_acceleration_structure, NULL);
+	ext.vkDestroyAccelerationStructureKHR(device, top_level_acceleration_structure, NULL);
 	vkFreeMemory(device, top_level_acceleration_structure_buffer_memory, NULL);
 	vkDestroyBuffer(device, top_level_acceleration_structure_buffer, NULL);
-	vkDestroyAccelerationStructureKHR(device, bottom_level_acceleration_structure, NULL);
+	ext.vkDestroyAccelerationStructureKHR(device, bottom_level_acceleration_structure, NULL);
 	vkFreeMemory(device, bottom_level_acceleration_structure_buffer_memory, NULL);
 	vkDestroyBuffer(device, bottom_level_acceleration_structure_buffer, NULL);
 	vkFreeMemory(device, transform_matrix_buffer_memory, NULL);
@@ -1588,7 +1218,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	vkDestroyFence(device, fence, NULL);
 	vkDestroyCommandPool(device, command_pool, NULL);
 	vkDestroyDevice(device, NULL);
-	vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, NULL);
+	ext.vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, NULL);
 	vkDestroyInstance(instance, NULL);
 
 	// report successful render
