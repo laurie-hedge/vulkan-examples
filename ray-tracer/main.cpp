@@ -744,13 +744,6 @@ static void setup_storage_image() {
 
 	vkBindImageMemory(ctx.device, ctx.storage_image, ctx.storage_image_memory, 0);
 
-	VkImageSubresourceRange image_sub_range {};
-	image_sub_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	image_sub_range.baseMipLevel = 0;
-	image_sub_range.levelCount = 1;
-	image_sub_range.baseArrayLayer = 0;
-	image_sub_range.layerCount = 1;
-
 	VkImageViewCreateInfo image_view_info {};
 	image_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	image_view_info.image = VK_NULL_HANDLE;
