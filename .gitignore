@@ -2,6 +2,7 @@
 *.spv
 *.ppm
 /mesh-shader/mesh-shader-test
+/mesh-shader-offscreen/mesh-shader-offscreen
 /ray-tracer-offscreen/ray-tracer-offscreen
 /ray-tracer-onscreen/ray-tracer-onscreen
 /ray-tracer-onscreen-anim/ray-tracer-onscreen-anim
