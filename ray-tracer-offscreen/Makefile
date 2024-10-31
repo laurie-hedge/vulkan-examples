@@ -1,5 +1,5 @@
-ray-tracer: main.c rgen.spv miss.spv hit.spv
-	gcc -g -Wunused-variable -o ray-tracer main.c -lvulkan
+ray-tracer-offscreen: main.c rgen.spv miss.spv hit.spv
+	gcc -o ray-tracer-offscreen main.c -lvulkan
 
 rgen.spv: rgen.glsl
 	glslc -fshader-stage=rgen rgen.glsl -o rgen.spv --target-spv=spv1.4
@@ -12,4 +12,4 @@ hit.spv: hit.glsl
 
 .PHONY: clean
 clean:
-	rm -f ray-tracer *.spv
+	rm -f ray-tracer-offscreen *.spv

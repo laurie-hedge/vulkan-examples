@@ -3,10 +3,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <vulkan/vulkan.h>
 
-#define IMAGE_WIDTH  800
-#define IMAGE_HEIGHT 600
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#define WINDOW_WIDTH  800
+#define WINDOW_HEIGHT 600
+#define APP_NAME      "Onscreen Ray Tracing Example"
 
 struct {
 	PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT;
@@ -25,16 +28,6 @@ struct {
 #define LOAD_EXTENSION_FUNC(FuncName) \
 	ext.FuncName = (PFN_##FuncName)vkGetInstanceProcAddr(instance, #FuncName); \
 	if (!ext.FuncName) return false
-
-void save_rgb8_image_to_ppm(char const *filename,
-                            uint16_t width_px,
-                            uint16_t height_px,
-                            uint8_t *texel_buffer) {
-	FILE *file = fopen(filename, "wb");
-	fprintf(file, "P6 %d %d 255\n", width_px, height_px);
-	fwrite(texel_buffer, 3, width_px * height_px, file);
-	fclose(file);
-}
 
 char *load_binary_file(char const *filename, size_t *size) {
 	FILE *file = fopen(filename, "rb");
@@ -148,18 +141,31 @@ bool create_shader_module(VkDevice device, char const *filename, VkShaderModule 
 	return result == VK_SUCCESS;
 }
 
-bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_px) {
+bool run_ray_tracer() {
+	// create window
+	glfwInit();
+	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+	GLFWwindow *window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, APP_NAME, NULL, NULL);
+
 	// create vulkan instance
 	VkApplicationInfo app_info = {
 		.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-		.pApplicationName   = "Offscreen Ray Tracing Example",
+		.pApplicationName   = APP_NAME,
 		.applicationVersion = VK_MAKE_VERSION(1, 0, 0),
 		.pEngineName        = "No Engine",
 		.engineVersion      = VK_MAKE_VERSION(1, 0, 0),
 		.apiVersion         = VK_API_VERSION_1_1,
 	};
 
-	char const *extension_names[] = { VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
+	uint32_t glfw_extension_count = 0;
+	char const **glfw_extensions = glfwGetRequiredInstanceExtensions(&glfw_extension_count);
+	char const *extension_names[glfw_extension_count+1];
+	for (uint32_t i = 0; i < glfw_extension_count; ++i) {
+		extension_names[i] = glfw_extensions[i];
+	}
+	extension_names[glfw_extension_count] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+
 	char const *validation_layers[] = { "VK_LAYER_KHRONOS_validation" };
 
 	VkInstanceCreateInfo instance_create_info = {
@@ -167,7 +173,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		.pApplicationInfo        = &app_info,
 		.enabledLayerCount       = 1,
 		.ppEnabledLayerNames     = validation_layers,
-		.enabledExtensionCount   = 1,
+		.enabledExtensionCount   = glfw_extension_count + 1,
 		.ppEnabledExtensionNames = extension_names,
 	};
 
@@ -209,6 +215,11 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
+	VkSurfaceKHR surface;
+	if (glfwCreateWindowSurface(instance, window, NULL, &surface) != VK_SUCCESS) {
+		return false;
+	}
+
 	// select physical device
 	uint32_t physical_device_count = 0;
 	vkEnumeratePhysicalDevices(instance, &physical_device_count, NULL);
@@ -219,7 +230,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	VkPhysicalDevice physical_devices[physical_device_count];
 	vkEnumeratePhysicalDevices(instance, &physical_device_count, physical_devices);
 
-	#define NUM_REQUIRED_EXTENSIONS 7
+	#define NUM_REQUIRED_EXTENSIONS 8
 	char const *required_extensions[NUM_REQUIRED_EXTENSIONS] = {
 		VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
 		VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
@@ -227,11 +238,12 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
 		VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
 		VK_KHR_SPIRV_1_4_EXTENSION_NAME,
-		VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME
+		VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
+		VK_KHR_SWAPCHAIN_EXTENSION_NAME
 	};
 
 	VkPhysicalDevice physical_device = VK_NULL_HANDLE;
-	uint32_t graphics_queue_index;
+	uint32_t graphics_queue_index, present_queue_index;
 	for (uint32_t i = 0; i < physical_device_count; ++i) {
 		VkPhysicalDeviceProperties device_properties;
 		vkGetPhysicalDeviceProperties(physical_devices[i], &device_properties);
@@ -264,13 +276,18 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		                                         &queue_family_count,
 		                                         queue_family_properties);
 		graphics_queue_index = UINT32_MAX;
+		present_queue_index  = UINT32_MAX;
 		for (uint32_t j = 0; j < queue_family_count; ++j) {
 			if (queue_family_properties[j].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
 				graphics_queue_index = j;
-				break;
+			}
+			VkBool32 present_support = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(physical_devices[i], j, surface, &present_support);
+			if (present_support) {
+				present_queue_index = j;
 			}
 		}
-		if (graphics_queue_index == UINT32_MAX) {
+		if (graphics_queue_index == UINT32_MAX || present_queue_index == UINT32_MAX) {
 			continue;
 		}
 
@@ -293,12 +310,23 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	vkGetPhysicalDeviceProperties2(physical_device, &device_properties);
 
 	float const queue_priority = 1.0f;
-	VkDeviceQueueCreateInfo device_queue_create_info = {
-		.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-		.queueFamilyIndex = graphics_queue_index,
-		.queueCount       = 1,
-		.pQueuePriorities = &queue_priority,
+	VkDeviceQueueCreateInfo device_queue_create_infos[2] = {
+		{
+			.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+			.queueFamilyIndex = graphics_queue_index,
+			.queueCount       = 1,
+			.pQueuePriorities = &queue_priority,
+		},
+		{
+			.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+			.queueFamilyIndex = present_queue_index,
+			.queueCount       = 1,
+			.pQueuePriorities = &queue_priority,
+		}
 	};
+
+	uint32_t queue_indices[2] = { graphics_queue_index, present_queue_index };
+	uint32_t const num_queues = graphics_queue_index == present_queue_index ? 1 : 2;
 
 	VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address_features = {
 		.sType               = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
@@ -325,8 +353,8 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	VkDeviceCreateInfo device_create_info = {
 		.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 		.pNext                   = (void*)&device_features,
-		.queueCreateInfoCount    = 1,
-		.pQueueCreateInfos       = &device_queue_create_info,
+		.queueCreateInfoCount    = num_queues,
+		.pQueueCreateInfos       = device_queue_create_infos,
 		.enabledExtensionCount   = NUM_REQUIRED_EXTENSIONS,
 		.ppEnabledExtensionNames = required_extensions,
 		.enabledLayerCount       = 1,
@@ -353,9 +381,95 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		}
 	}
 
-	// get graphics queue from device
+	// get queues from device
 	VkQueue graphics_queue;
 	vkGetDeviceQueue(device, graphics_queue_index, 0, &graphics_queue);
+	VkQueue present_queue;
+	vkGetDeviceQueue(device, present_queue_index, 0, &present_queue);
+
+	// create swap chain
+	VkSurfaceCapabilitiesKHR swap_chain_capabilities;
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &swap_chain_capabilities);
+
+	uint32_t surface_format_count;
+	vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &surface_format_count, NULL);
+	VkSurfaceFormatKHR surface_formats[surface_format_count];
+	vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &surface_format_count, surface_formats);
+
+	VkSurfaceFormatKHR surface_format = surface_formats[0];
+	for (uint32_t i = 0; i < surface_format_count; ++i) {
+		if (surface_formats[i].format == VK_FORMAT_B8G8R8A8_SRGB &&
+		    surface_formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+			surface_format = surface_formats[i];
+			break;
+		}
+	}
+
+	uint32_t present_mode_count;
+	vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &present_mode_count, NULL);
+	if (present_mode_count == 0) {
+		return false;
+	}
+	VkPresentModeKHR present_modes[present_mode_count];
+	vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &present_mode_count, present_modes);
+
+	VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
+	for (uint32_t i = 0; i < present_mode_count; ++i) {
+		if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+			present_mode = present_modes[i];
+			break;
+		}
+	}
+
+	VkExtent2D surface_extent = swap_chain_capabilities.currentExtent;
+	if (swap_chain_capabilities.currentExtent.width == UINT32_MAX) {
+		int width, height;
+		glfwGetFramebufferSize(window, &width, &height);
+		surface_extent.width  = width > swap_chain_capabilities.maxImageExtent.width
+		                      ? swap_chain_capabilities.maxImageExtent.width
+		                      : width < swap_chain_capabilities.minImageExtent.width
+		                      ? swap_chain_capabilities.minImageExtent.width
+		                      : width;
+		surface_extent.height = height > swap_chain_capabilities.maxImageExtent.height
+		                      ? swap_chain_capabilities.maxImageExtent.height
+		                      : height < swap_chain_capabilities.minImageExtent.height
+		                      ? swap_chain_capabilities.minImageExtent.height
+		                      : height;
+	}
+
+	uint32_t image_count = swap_chain_capabilities.minImageCount + 1;
+	if (swap_chain_capabilities.maxImageCount > 0 && image_count > swap_chain_capabilities.maxImageCount) {
+		image_count = swap_chain_capabilities.maxImageCount;
+	}
+
+	VkSwapchainCreateInfoKHR swapchain_create_info = {
+		.sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+		.surface               = surface,
+		.minImageCount         = image_count,
+		.imageFormat           = surface_format.format,
+		.imageColorSpace       = surface_format.colorSpace,
+		.imageExtent           = surface_extent,
+		.imageArrayLayers      = 1,
+		.imageUsage            = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		.imageSharingMode      = num_queues > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE,
+		.queueFamilyIndexCount = num_queues,
+		.pQueueFamilyIndices   = queue_indices,
+		.preTransform          = swap_chain_capabilities.currentTransform,
+		.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+		.presentMode           = present_mode,
+		.clipped               = VK_TRUE,
+		.oldSwapchain          = VK_NULL_HANDLE,
+	};
+
+	VkSwapchainKHR swap_chain;
+	if (vkCreateSwapchainKHR(device, &swapchain_create_info, NULL, &swap_chain) != VK_SUCCESS) {
+		return false;
+	}
+
+	// get swap chain images
+	vkGetSwapchainImagesKHR(device, swap_chain, &image_count, NULL);
+	VkImage swap_chain_images[image_count];
+	vkGetSwapchainImagesKHR(device, swap_chain, &image_count, swap_chain_images);
 
 	// create command pool
 	VkCommandPoolCreateInfo command_pool_create_info = {
@@ -380,6 +494,20 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
+	// create semaphores
+	VkSemaphoreCreateInfo semaphore_create_info = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+	};
+
+	VkSemaphore image_available_semaphore;
+	if (vkCreateSemaphore(device, &semaphore_create_info, NULL, &image_available_semaphore) != VK_SUCCESS) {
+		return false;
+	}
+	VkSemaphore render_finished_semaphore;
+	if (vkCreateSemaphore(device, &semaphore_create_info, NULL, &render_finished_semaphore) != VK_SUCCESS) {
+		return false;
+	}
+
 	// create fence
 	VkFenceCreateInfo fence_create_info = {
 		.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -395,8 +523,8 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 		.imageType     = VK_IMAGE_TYPE_2D,
 		.format        = VK_FORMAT_R8G8B8A8_UNORM,
-		.extent.width  = width_px,
-		.extent.height = height_px,
+		.extent.width  = surface_extent.width,
+		.extent.height = surface_extent.height,
 		.extent.depth  = 1,
 		.mipLevels     = 1,
 		.arrayLayers   = 1,
@@ -433,6 +561,60 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	if (vkBindImageMemory(device, image, image_memory, 0) != VK_SUCCESS) {
 		return false;
 	}
+
+	// change image layout from undefined to general
+	vkResetCommandBuffer(command_buffer, 0);
+
+	VkCommandBufferBeginInfo command_buffer_begin_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+	};
+	if (vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info) != VK_SUCCESS) {
+		return false;
+	}
+
+	VkImageMemoryBarrier image_memory_barrier = {
+		.sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+		.oldLayout                   = VK_IMAGE_LAYOUT_UNDEFINED,
+		.newLayout                   = VK_IMAGE_LAYOUT_GENERAL,
+		.srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED,
+		.dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED,
+		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		.subresourceRange.levelCount = 1,
+		.subresourceRange.layerCount = 1,
+		.image                       = image,
+	};
+
+	vkCmdPipelineBarrier(
+		command_buffer,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		0,
+		NULL,
+		0,
+		NULL,
+		1,
+		&image_memory_barrier
+	);
+
+	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+		return false;
+	}
+
+	VkSubmitInfo submit_info = {
+		.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.commandBufferCount = 1,
+		.pCommandBuffers    = &command_buffer,
+	};
+	if (vkQueueSubmit(graphics_queue, 1, &submit_info, fence) != VK_SUCCESS) {
+		return false;
+	}
+
+	if (vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+		return false;
+	}
+
+	vkResetFences(device, 1, &fence);
 
 	// create image view
 	VkImageViewCreateInfo image_view_create_info = {
@@ -615,9 +797,6 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	vkResetCommandBuffer(command_buffer, 0);
 
-	VkCommandBufferBeginInfo command_buffer_begin_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-	};
 	if (vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info) != VK_SUCCESS) {
 		return false;
 	}
@@ -633,11 +812,6 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 		return false;
 	}
 
-	VkSubmitInfo submit_info = {
-		.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-		.commandBufferCount = 1,
-		.pCommandBuffers    = &command_buffer,
-	};
 	if (vkQueueSubmit(graphics_queue, 1, &submit_info, fence) != VK_SUCCESS) {
 		return false;
 	}
@@ -797,21 +971,6 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	vkFreeMemory(device, acceleration_structure_instance_buffer_memory, NULL);
 	vkDestroyBuffer(device, acceleration_structure_instance_buffer, NULL);
-
-	// create destination buffer for image data
-	uint32_t const image_buffer_size = width_px * height_px * 4;
-
-	VkBuffer image_buffer;
-	VkDeviceMemory image_buffer_memory;
-	if (!create_buffer(device,
-	                   host_coherent_memory_types,
-	                   image_buffer_size,
-	                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-	                   &image_buffer,
-	                   &image_buffer_memory,
-	                   NULL, NULL)) {
-		return false;
-	}
 
 	// create descriptor set layout
 	VkDescriptorSetLayoutBinding descriptor_set_layout_bindings[2] = {
@@ -1047,149 +1206,175 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 	vkUpdateDescriptorSets(device, 2, write_descriptor_sets, 0, NULL);
 
-	// record command buffer
-	vkResetCommandBuffer(command_buffer, 0);
+	// main app loop
+	while (!glfwWindowShouldClose(window)) {
+		// handle window system events
+		glfwPollEvents();
 
-	if (vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info) != VK_SUCCESS) {
-		return false;
+		// acquire next swap chain image
+		uint32_t swap_chain_image_index;
+		vkAcquireNextImageKHR(device,
+		                      swap_chain,
+		                      UINT64_MAX,
+		                      image_available_semaphore,
+		                      VK_NULL_HANDLE,
+		                      &swap_chain_image_index);
+
+		// record command buffer
+		vkResetCommandBuffer(command_buffer, 0);
+
+		if (vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info) != VK_SUCCESS) {
+			return false;
+		}
+
+		vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, ray_tracing_pipeline);
+
+		vkCmdBindDescriptorSets(
+			command_buffer,
+			VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+			pipeline_layout,
+			0,
+			1,
+			&descriptor_set,
+			0,
+			NULL
+		);
+
+		VkStridedDeviceAddressRegionKHR raygen_shader_table_entry = {
+			.deviceAddress = shader_table_buffer_device_address.deviceAddress,
+			.stride        = shader_handle_size_aligned,
+			.size          = shader_handle_size_aligned,
+		};
+
+		VkStridedDeviceAddressRegionKHR miss_shader_table_entry = {
+			.deviceAddress = shader_table_buffer_device_address.deviceAddress + shader_handle_size_aligned,
+			.stride        = shader_handle_size_aligned,
+			.size          = shader_handle_size_aligned,
+		};
+
+		VkStridedDeviceAddressRegionKHR hit_shader_table_entry = {
+			.deviceAddress = shader_table_buffer_device_address.deviceAddress + (shader_handle_size_aligned * 2),
+			.stride        = shader_handle_size_aligned,
+			.size          = shader_handle_size_aligned,
+		};
+
+		VkStridedDeviceAddressRegionKHR callable_shader_table_entry = { };
+
+		ext.vkCmdTraceRaysKHR(
+			command_buffer,
+			&raygen_shader_table_entry,
+			&miss_shader_table_entry,
+			&hit_shader_table_entry,
+			&callable_shader_table_entry,
+			surface_extent.width,
+			surface_extent.height,
+			1
+		);
+
+		VkImageMemoryBarrier image_memory_barrier = {
+			.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+			.subresourceRange.baseMipLevel   = 0,
+			.subresourceRange.levelCount     = 1,
+			.subresourceRange.baseArrayLayer = 0,
+			.subresourceRange.layerCount     = 1,
+			.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED,
+			.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT,
+			.dstAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT,
+			.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED,
+			.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.image                           = swap_chain_images[swap_chain_image_index],
+		};
+
+		vkCmdPipelineBarrier(
+			command_buffer,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			0,
+			0,
+			NULL,
+			0,
+			NULL,
+			1,
+			&image_memory_barrier
+		);
+
+		VkImageCopy image_copy = {
+			.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.srcSubresource.layerCount = 1,
+			.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.dstSubresource.layerCount = 1,
+			.extent.width              = surface_extent.width,
+			.extent.height             = surface_extent.height,
+			.extent.depth              = 1,
+		};
+
+		vkCmdCopyImage(
+			command_buffer,
+			image,
+			VK_IMAGE_LAYOUT_GENERAL,
+			swap_chain_images[swap_chain_image_index],
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			1,
+			&image_copy
+		);
+
+		image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		image_memory_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+		image_memory_barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		image_memory_barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		image_memory_barrier.image         = swap_chain_images[swap_chain_image_index];
+		vkCmdPipelineBarrier(
+			command_buffer,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			0,
+			0,
+			NULL,
+			0,
+			NULL,
+			1,
+			&image_memory_barrier
+		);
+
+		if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+			return false;
+		}
+
+		VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+
+		VkSubmitInfo submit_info = {
+			.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+			.waitSemaphoreCount   = 1,
+			.pWaitSemaphores      = &image_available_semaphore,
+			.pWaitDstStageMask    = &wait_stage,
+			.commandBufferCount   = 1,
+			.pCommandBuffers      = &command_buffer,
+			.signalSemaphoreCount = 1,
+			.pSignalSemaphores    = &render_finished_semaphore,
+		};
+
+		if (vkQueueSubmit(graphics_queue, 1, &submit_info, fence) != VK_SUCCESS) {
+			return false;
+		}
+
+		VkPresentInfoKHR present_info = {
+			.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+			.waitSemaphoreCount = 1,
+			.pWaitSemaphores    = &render_finished_semaphore,
+			.swapchainCount     = 1,
+			.pSwapchains        = &swap_chain,
+			.pImageIndices      = &swap_chain_image_index,
+		};
+		vkQueuePresentKHR(present_queue, &present_info);
+
+		vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+		vkResetFences(device, 1, &fence);
 	}
 
-	VkImageMemoryBarrier image_memory_barrier = {
-		.sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.oldLayout                   = VK_IMAGE_LAYOUT_UNDEFINED,
-		.newLayout                   = VK_IMAGE_LAYOUT_GENERAL,
-		.srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED,
-		.dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED,
-		.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.subresourceRange.levelCount = 1,
-		.subresourceRange.layerCount = 1,
-		.image                       = image,
-	};
-
-	vkCmdPipelineBarrier(
-		command_buffer,
-		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-		0,
-		0,
-		NULL,
-		0,
-		NULL,
-		1,
-		&image_memory_barrier
-	);
-
-	vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, ray_tracing_pipeline);
-
-	vkCmdBindDescriptorSets(
-		command_buffer,
-		VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-		pipeline_layout,
-		0,
-		1,
-		&descriptor_set,
-		0,
-		NULL
-	);
-
-	VkStridedDeviceAddressRegionKHR raygen_shader_table_entry = {
-		.deviceAddress = shader_table_buffer_device_address.deviceAddress,
-		.stride        = shader_handle_size_aligned,
-		.size          = shader_handle_size_aligned,
-	};
-
-	VkStridedDeviceAddressRegionKHR miss_shader_table_entry = {
-		.deviceAddress = shader_table_buffer_device_address.deviceAddress + shader_handle_size_aligned,
-		.stride        = shader_handle_size_aligned,
-		.size          = shader_handle_size_aligned,
-	};
-
-	VkStridedDeviceAddressRegionKHR hit_shader_table_entry = {
-		.deviceAddress = shader_table_buffer_device_address.deviceAddress + (shader_handle_size_aligned * 2),
-		.stride        = shader_handle_size_aligned,
-		.size          = shader_handle_size_aligned,
-	};
-
-	VkStridedDeviceAddressRegionKHR callable_shader_table_entry = { };
-
-	ext.vkCmdTraceRaysKHR(
-		command_buffer,
-		&raygen_shader_table_entry,
-		&miss_shader_table_entry,
-		&hit_shader_table_entry,
-		&callable_shader_table_entry,
-		width_px,
-		height_px,
-		1
-	);
-
-	image_memory_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-	vkCmdPipelineBarrier(
-		command_buffer,
-		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-		0,
-		0,
-		NULL,
-		0,
-		NULL,
-		1,
-		&image_memory_barrier
-	);
-
-	VkBufferImageCopy buffer_image_copy = {
-		.bufferOffset                    = 0,
-		.bufferRowLength                 = 0,
-		.bufferImageHeight               = 0,
-		.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-		.imageSubresource.mipLevel       = 0,
-		.imageSubresource.baseArrayLayer = 0,
-		.imageSubresource.layerCount     = 1,
-		.imageOffset.x                   = 0,
-		.imageOffset.y                   = 0,
-		.imageOffset.z                   = 0,
-		.imageExtent.width               = width_px,
-		.imageExtent.height              = height_px,
-		.imageExtent.depth               = 1,
-	};
-
-	vkCmdCopyImageToBuffer(command_buffer,
-	                       image,
-	                       VK_IMAGE_LAYOUT_GENERAL,
-	                       image_buffer,
-	                       1,
-	                       &buffer_image_copy);
-
-
-	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
-		return false;
-	}
-
-	// submit command buffer
-	if (vkQueueSubmit(graphics_queue, 1, &submit_info, fence) != VK_SUCCESS) {
-		return false;
-	}
-
-	if (vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-		return false;
-	}
-
-	vkResetFences(device, 1, &fence);
-
-	// read back image data into output buffer
-	if (vkMapMemory(device, image_buffer_memory, 0, image_buffer_size, 0, &mapped) != VK_SUCCESS) {
-		return false;
-	}
-
-	uint8_t *image_src_data = mapped;
-	for (uint32_t s = 0, d = 0; s < image_buffer_size; s += 4, d += 3) {
-		texel_buffer[d+0] = image_src_data[s+0];
-		texel_buffer[d+1] = image_src_data[s+1];
-		texel_buffer[d+2] = image_src_data[s+2];
-	}
-
-	vkUnmapMemory(device, image_buffer_memory);
+	// wait for all renders to finish before cleanup
+	vkDeviceWaitIdle(device);
 
 	// free all resources
 	vkDestroyDescriptorPool(device, descriptor_pool, NULL);
@@ -1198,8 +1383,6 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	vkDestroyPipeline(device, ray_tracing_pipeline, NULL);
 	vkDestroyPipelineLayout(device, pipeline_layout, NULL);
 	vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
-	vkFreeMemory(device, image_buffer_memory, NULL);
-	vkDestroyBuffer(device, image_buffer, NULL);
 	ext.vkDestroyAccelerationStructureKHR(device, top_level_acceleration_structure, NULL);
 	vkFreeMemory(device, top_level_acceleration_structure_buffer_memory, NULL);
 	vkDestroyBuffer(device, top_level_acceleration_structure_buffer, NULL);
@@ -1216,22 +1399,25 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 	vkFreeMemory(device, image_memory, NULL);
 	vkDestroyImage(device, image, NULL);
 	vkDestroyFence(device, fence, NULL);
+	vkDestroySemaphore(device, render_finished_semaphore, NULL);
+	vkDestroySemaphore(device, image_available_semaphore, NULL);
 	vkDestroyCommandPool(device, command_pool, NULL);
+	vkDestroySwapchainKHR(device, swap_chain, NULL);
 	vkDestroyDevice(device, NULL);
+	vkDestroySurfaceKHR(instance, surface, NULL);
 	ext.vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, NULL);
 	vkDestroyInstance(instance, NULL);
+	glfwDestroyWindow(window);
+	glfwTerminate();
 
-	// report successful render
+	// report successful run
 	return true;
 }
 
 int main() {
-	uint8_t *texel_buffer = malloc(IMAGE_WIDTH * IMAGE_HEIGHT * 3);
-	if (!ray_trace_image(texel_buffer, IMAGE_WIDTH, IMAGE_HEIGHT)) {
-		fputs("render failed\n", stderr);
+	if (!run_ray_tracer()) {
+		fputs("run failed\n", stderr);
 		return 1;
 	}
-	save_rgb8_image_to_ppm("image.ppm", IMAGE_WIDTH, IMAGE_HEIGHT, texel_buffer);
-	free(texel_buffer);
 	return 0;
 }

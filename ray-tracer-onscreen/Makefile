@@ -1,8 +1,5 @@
-CFLAGS = -std=c++17 -O2
-LDFLAGS = -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi
-
-ray-tracer-test: main.cpp rgen.spv miss.spv hit.spv
-	g++ $(CFLAGS) -o ray-tracer-test main.cpp $(LDFLAGS)
+ray-tracer-onscreen: main.c rgen.spv miss.spv hit.spv
+	gcc -o ray-tracer-onscreen main.c -lvulkan -lglfw
 
 rgen.spv: rgen.glsl
 	glslc -fshader-stage=rgen rgen.glsl -o rgen.spv --target-spv=spv1.4
@@ -15,4 +12,4 @@ hit.spv: hit.glsl
 
 .PHONY: clean
 clean:
-	rm -f ray-tracer-test
+	rm -f ray-tracer-onscreen *.spv

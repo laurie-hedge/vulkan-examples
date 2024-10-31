@@ -3,4 +3,5 @@
 *.ppm
 /mesh-shader/mesh-shader-test
 /ray-tracer/ray-tracer-test
-/ray-tracer-offscreen/ray-tracer
+/ray-tracer-offscreen/ray-tracer-offscreen
+/ray-tracer-onscreen/ray-tracer-onscreen
