@@ -215,6 +215,7 @@ bool run_ray_tracer() {
 		return false;
 	}
 
+	// create surface
 	VkSurfaceKHR surface;
 	if (glfwCreateWindowSurface(instance, window, NULL, &surface) != VK_SUCCESS) {
 		return false;
