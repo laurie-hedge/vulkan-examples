@@ -1,7 +1,7 @@
 *.sublime*
 *.spv
 *.ppm
-/mesh-shader/mesh-shader-test
+/compute-shader-offscreen/compute-shader-offscreen
 /mesh-shader-offscreen/mesh-shader-offscreen
 /mesh-shader-onscreen/mesh-shader-onscreen
 /mesh-shader-onscreen-anim/mesh-shader-onscreen-anim
