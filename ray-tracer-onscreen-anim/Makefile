@@ -1,4 +1,6 @@
-ray-tracer-onscreen-anim: main.c rgen.spv miss.spv hit.spv
+all: ray-tracer-onscreen-anim rgen.spv miss.spv hit.spv
+
+ray-tracer-onscreen-anim: main.c
 	gcc -o ray-tracer-onscreen-anim main.c -lvulkan -lglfw -lm
 
 rgen.spv: rgen.glsl

@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,7 +10,7 @@
 
 #define WINDOW_WIDTH  800
 #define WINDOW_HEIGHT 600
-#define APP_NAME      "Onscreen Mesh Shader Example"
+#define APP_NAME      "Onscreen Animated Mesh Shader Example"
 
 struct {
 	PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT;
@@ -261,6 +262,21 @@ bool run_rasterizer() {
 		return false;
 	}
 
+	// find host coherent memory types
+	VkPhysicalDeviceMemoryProperties memory_properties;
+	vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+	
+	uint32_t host_coherent_memory_types = 0;
+	for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+		if ((memory_properties.memoryTypes[i].propertyFlags &
+			 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+			(memory_properties.memoryTypes[i].propertyFlags &
+			 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+			) {
+			host_coherent_memory_types |= 1 << i;
+		}
+	}
+
 	// get queues from device
 	VkQueue graphics_queue;
 	vkGetDeviceQueue(device, graphics_queue_index, 0, &graphics_queue);
@@ -469,13 +485,75 @@ bool run_rasterizer() {
 		return false;
 	}
 
+	// create descriptor set layout
+	VkDescriptorSetLayoutBinding uniform_descriptor_set_layout_binding = {
+		.binding         = 0,
+		.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+		.stageFlags      = VK_SHADER_STAGE_MESH_BIT_EXT,
+	};
+
+	VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {
+		.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = 1,
+		.pBindings    = &uniform_descriptor_set_layout_binding,
+	};
+
+	VkDescriptorSetLayout descriptor_set_layout;
+	if (vkCreateDescriptorSetLayout(device,
+	                                &descriptor_set_layout_create_info,
+	                                NULL, &descriptor_set_layout) != VK_SUCCESS) {
+		return false;
+	}
+
 	// create pipeline layout
 	VkPipelineLayoutCreateInfo pipeline_layout_create_info = {
 		.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		.setLayoutCount = 1,
+		.pSetLayouts    = &descriptor_set_layout,
 	};
 
 	VkPipelineLayout pipeline_layout;
 	if (vkCreatePipelineLayout(device, &pipeline_layout_create_info, NULL, &pipeline_layout) != VK_SUCCESS) {
+		return false;
+	}
+
+	// create uniform buffer
+	VkBufferCreateInfo uniform_buffer_create_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size  = sizeof(float),
+		.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+	};
+
+	VkBuffer uniform_buffer;
+	if (vkCreateBuffer(device, &uniform_buffer_create_info, NULL, &uniform_buffer) != VK_SUCCESS) {
+		return false;
+	}
+
+	VkMemoryRequirements memory_requirements;
+	vkGetBufferMemoryRequirements(device, uniform_buffer, &memory_requirements);
+
+	uint32_t const memory_types_matching_requirements =
+		memory_requirements.memoryTypeBits & host_coherent_memory_types;
+	if (memory_types_matching_requirements == 0) {
+		return false;
+	}
+
+	VkMemoryAllocateInfo uniform_buffer_memory_allocate_info = {
+		.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize  = memory_requirements.size,
+		.memoryTypeIndex = __builtin_ctz(memory_types_matching_requirements),
+	};
+
+	VkDeviceMemory uniform_buffer_memory;
+	if (vkAllocateMemory(device,
+	                     &uniform_buffer_memory_allocate_info,
+	                     NULL,
+	                     &uniform_buffer_memory) != VK_SUCCESS) {
+		return false;
+	}
+
+	if (vkBindBufferMemory(device, uniform_buffer, uniform_buffer_memory, 0) != VK_SUCCESS) {
 		return false;
 	}
 
@@ -602,10 +680,72 @@ bool run_rasterizer() {
 		}
 	}
 
+	// create descriptor pool
+	VkDescriptorPoolSize descriptor_pool_size = {
+		.type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+	};
+
+	VkDescriptorPoolCreateInfo descriptor_pool_create_info = {
+		.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+		.poolSizeCount = 1,
+		.pPoolSizes    = &descriptor_pool_size,
+		.maxSets       = 1,
+	};
+
+	VkDescriptorPool descriptor_pool;
+	if (vkCreateDescriptorPool(device, &descriptor_pool_create_info, NULL, &descriptor_pool) != VK_SUCCESS) {
+		return false;
+	}
+
+	// allocate descriptor set
+	VkDescriptorSetAllocateInfo descriptor_set_allocate_info = {
+		.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool     = descriptor_pool,
+		.descriptorSetCount = 1,
+		.pSetLayouts        = &descriptor_set_layout,
+	};
+
+	VkDescriptorSet descriptor_set;
+	if (vkAllocateDescriptorSets(device, &descriptor_set_allocate_info, &descriptor_set) != VK_SUCCESS) {
+		return false;
+	}
+
+	// update descriptor set
+	VkDescriptorBufferInfo descriptor_buffer_info = {
+		.buffer = uniform_buffer,
+		.offset = 0,
+		.range  = sizeof(float),
+	};
+
+	VkWriteDescriptorSet write_descriptor_set = {
+		.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet          = descriptor_set,
+		.dstBinding      = 0,
+		.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+		.pBufferInfo     = &descriptor_buffer_info,
+	};
+
+	vkUpdateDescriptorSets(device, 1, &write_descriptor_set, 0, NULL);
+
 	// main app loop
 	while (!glfwWindowShouldClose(window)) {
 		// handle window system events
 		glfwPollEvents();
+
+		// update uniform buffer to animate triangle
+		static float x = 0.0f;
+		float offset = sinf(x);
+		x += 0.0001f;
+
+		void *mapped;
+		if (vkMapMemory(device, uniform_buffer_memory, 0, sizeof(offset), 0, &mapped) != VK_SUCCESS) {
+			return false;
+		}
+		memcpy(mapped, &offset, sizeof(offset));
+		vkUnmapMemory(device, uniform_buffer_memory);
 
 		// acquire next swap chain image
 		uint32_t swap_chain_image_index;
@@ -637,6 +777,17 @@ bool run_rasterizer() {
 		vkCmdBeginRenderPass(command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
 		vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
+
+		vkCmdBindDescriptorSets(
+			command_buffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline_layout,
+			0,
+			1,
+			&descriptor_set,
+			0,
+			NULL
+		);
 
 		ext.vkCmdDrawMeshTasksEXT(command_buffer, 1, 1, 1);
 
@@ -681,11 +832,15 @@ bool run_rasterizer() {
 	vkDeviceWaitIdle(device);
 
 	// free all resources
+	vkDestroyDescriptorPool(device, descriptor_pool, NULL);
 	for (uint32_t i = 0; i < image_count; ++i) {
 		vkDestroyFramebuffer(device, swap_chain_framebuffers[i], NULL);
 	}
 	vkDestroyPipeline(device, graphics_pipeline, NULL);
+	vkFreeMemory(device, uniform_buffer_memory, NULL);
+	vkDestroyBuffer(device, uniform_buffer, NULL);
 	vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+	vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
 	vkDestroyRenderPass(device, render_pass, NULL);
 	for (uint32_t i = 0; i < image_count; ++i) {
 		vkDestroyImageView(device, swap_chain_image_views[i], NULL);

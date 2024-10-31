@@ -1,4 +1,6 @@
-mesh-shader-offscreen: main.c mesh.spv frag.spv
+all: mesh-shader-offscreen mesh.spv frag.spv
+
+mesh-shader-offscreen: main.c
 	gcc -o mesh-shader-offscreen main.c -lvulkan
 
 mesh.spv: mesh.glsl

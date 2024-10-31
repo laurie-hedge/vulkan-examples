@@ -1,4 +1,6 @@
-ray-tracer-offscreen: main.c rgen.spv miss.spv hit.spv
+all: ray-tracer-offscreen rgen.spv miss.spv hit.spv
+
+ray-tracer-offscreen: main.c
 	gcc -o ray-tracer-offscreen main.c -lvulkan
 
 rgen.spv: rgen.glsl
