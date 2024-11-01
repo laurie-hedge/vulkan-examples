@@ -75,7 +75,7 @@ bool create_shader_module(VkDevice device, char const *filename, VkShaderModule 
 	return result == VK_SUCCESS;
 }
 
-bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_px) {
+bool render_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_px) {
 	// create vulkan instance
 	VkApplicationInfo app_info = {
 		.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -701,7 +701,7 @@ bool ray_trace_image(uint8_t *texel_buffer, uint16_t width_px, uint16_t height_p
 
 int main() {
 	uint8_t *texel_buffer = malloc(IMAGE_WIDTH * IMAGE_HEIGHT * 3);
-	if (!ray_trace_image(texel_buffer, IMAGE_WIDTH, IMAGE_HEIGHT)) {
+	if (!render_image(texel_buffer, IMAGE_WIDTH, IMAGE_HEIGHT)) {
 		fputs("render failed\n", stderr);
 		return 1;
 	}
